@@ -28,6 +28,11 @@ from ..utils import (
 _ENCODING_CHARS = 'ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-_'
 
 
+def _parse_count(value):
+    count = None if isinstance(value, bool) else int_or_none(value)
+    return count if count is not None and count >= 0 else None
+
+
 def _pk_to_id(media_id):
     """Source: https://stackoverflow.com/questions/24437823/getting-instagram-post-url-from-media-id"""
     pk = int(str(media_id).split('_')[0])
@@ -98,7 +103,7 @@ class InstagramBaseIE(InfoExtractor):
     def _get_count(self, media, kind, *keys):
         return traverse_obj(
             media, (kind, 'count'), *((f'edge_media_{key}', 'count') for key in keys),
-            expected_type=int_or_none)
+            expected_type=_parse_count)
 
     def _get_dimension(self, name, media, webpage=None):
         return (
@@ -142,7 +147,8 @@ class InstagramBaseIE(InfoExtractor):
                     node, 'display_url', 'thumbnail_src', 'display_src', expected_type=url_or_none),
                 'duration': float_or_none(node.get('video_duration')),
                 'timestamp': int_or_none(node.get('taken_at_timestamp')),
-                'view_count': int_or_none(node.get('video_view_count')),
+                'view_count': traverse_obj(
+                    node, (('video_view_count', 'video_play_count'), {_parse_count}, any)),
                 'comment_count': self._get_count(node, 'comments', 'preview_comment', 'to_comment', 'to_parent_comment'),
                 'like_count': self._get_count(node, 'likes', 'preview_like'),
             }
@@ -195,15 +201,23 @@ class InstagramBaseIE(InfoExtractor):
                 'channel': ('user', 'username', {str}),
                 'uploader_id': ('user', 'pk', {str_or_none}),
                 'uploader': ('user', 'full_name', {str}),
+                'channel_follower_count': ('user', 'follower_count', {_parse_count}),
+                'channel_is_verified': ('user', 'is_verified', {bool}),
                 'timestamp': ('taken_at', {int_or_none}),
-                'view_count': ('view_count', {int_or_none}),
-                'like_count': ('like_count', {int_or_none}),
-                'comment_count': ('comment_count', {int_or_none}),
+                # Keep the existing view metric when available. Reel plays are a fallback.
+                'view_count': (('view_count', 'play_count'), {_parse_count}, any),
+                'like_count': ('like_count', {_parse_count}),
+                'comment_count': ('comment_count', {_parse_count}),
+                'repost_count': ('media_repost_count', {_parse_count}),
+                'save_count': ('save_count', {_parse_count}),
             }),
             'http_headers': {
                 'Referer': 'https://www.instagram.com/',
             },
         }
+
+        if username := traverse_obj(product_info, ('user', 'username', {str})):
+            info_dict['channel_url'] = info_dict['uploader_url'] = f'https://www.instagram.com/{username}/'
 
         if carousel_media := traverse_obj(product_info, ('carousel_media', ..., {dict})):
             comments = None

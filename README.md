@@ -15,6 +15,28 @@
 
 yt-dlp is a feature-rich command-line audio/video downloader with support for [thousands of sites](supportedsites.md). The project is a fork of [youtube-dl](https://github.com/ytdl-org/youtube-dl) based on the now inactive [youtube-dlc](https://github.com/blackjack4494/yt-dlc).
 
+## Rockcorp Instagram stats experiment
+
+The `instagram-stats` branch adds metadata mappings to the existing Instagram extractor:
+
+* `view_count` uses Instagram's `view_count`, falling back to `play_count` when the view count is unavailable. The older GraphQL node parser also falls back from `video_view_count` to `video_play_count`. These counters can have different counting rules. They are never added together.
+* `channel_follower_count` and `channel_is_verified` use the user data included in the post response. `channel_url` and `uploader_url` link to that user's profile.
+* `repost_count` uses `media_repost_count`. `save_count` uses `save_count` when provided. Reposts are not treated as share counts.
+* Missing, malformed, and negative counts remain unknown. A genuine zero stays zero.
+
+This branch makes no additional network requests. It does not add search, restore profile-feed extraction, or fetch private insights. Instagram's logged-out post responses omitted both view and play counts in our public-URL probes on November 2, 2026. A separate public profile-info probe returned HTTP 401. Mapping a field cannot recover data the server withholds. Authenticated extraction has unit coverage but has not been tested with a live account.
+
+Install this branch in a separate Python environment:
+
+```sh
+python -m pip install 'yt-dlp[default,curl-cffi] @ git+https://github.com/rockcorp/yt-dlp.git@instagram-stats'
+yt-dlp --ignore-config --skip-download --dump-single-json 'https://www.instagram.com/reel/SHORTCODE/'
+```
+
+For an authenticated test, add `--cookies-from-browser firefox` using an account you control. Instagram can rate-limit requests or restrict the account. No browser cookies or credentials are bundled with this fork. Report results in the Rockcorp fork. Upstream does not accept AI-authored contributions.
+
+Run the metadata regression tests with `python -m unittest test.test_instagram`.
+
 <!-- MANPAGE: MOVE "USAGE AND OPTIONS" SECTION HERE -->
 
 <!-- MANPAGE: BEGIN EXCLUDED SECTION -->
