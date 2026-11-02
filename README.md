@@ -25,8 +25,9 @@ The `instagram-stats` branch adds metadata mappings to the existing Instagram ex
 * `--extractor-args 'instagram:author_stats'` attaches the same author fields to a post or Reel result. It makes one extra profile-page request per author per extractor instance and caches successful lookups. The returned handle and account ID must match the post author. Lookup failures produce a warning and preserve the post result.
 * `repost_count` uses `media_repost_count`. `save_count` uses `save_count` when provided. Reposts are not treated as share counts.
 * Missing, malformed, and negative counts remain unknown. A genuine zero stays zero.
+* `instagram:creator:USERNAME` returns an author snapshot and up to ten recent unpinned Reels in `instagram_posts`. It reads plays, likes, and comments from the public Reels tab, paginates past pinned Reels, and fetches each Reel's caption and publish timestamp. It downloads no media. Collaboration posts require explicit coauthor membership.
 
-Ordinary post extraction makes no additional network requests unless author stats are requested. This branch does not add search, restore profile-feed extraction, or fetch private insights. Instagram's logged-out post responses omitted both view and play counts in our public-URL probes on November 2, 2026. The profile-info API returned HTTP 401, but the public profile HTML supplied exact follower and following counts, biographies, and bio links without login. All three profiles tested returned a null post count. Authenticated extraction has unit coverage but has not been tested with a live account.
+Ordinary post extraction makes no additional network requests unless author stats are requested. The creator command performs its own profile, pagination, and post-metadata requests. This branch does not add search, restore the old profile-feed downloader, or fetch private insights. The Reels tab supplies play counts that individual logged-out post responses omit. Public profile HTML supplies follower and following counts, biographies, and bio links without login. The profiles tested returned a null total post count. Shares and saves were unavailable in the public responses tested. Authenticated extraction has unit coverage but has not been tested with a live account.
 
 Install this branch in a separate Python environment:
 
@@ -39,12 +40,30 @@ Fetch author stats directly, or include them with a Reel:
 
 ```sh
 yt-dlp --ignore-config --dump-single-json 'instagram:profile:prettysoulstories'
+yt-dlp --ignore-config --dump-single-json 'instagram:creator:prettysoulstories'
 yt-dlp --ignore-config --skip-download --dump-single-json --extractor-args 'instagram:author_stats' 'https://www.instagram.com/reel/Dekn5A8hbRF/'
 ```
 
 For an authenticated test, add `--cookies-from-browser firefox` using an account you control. Instagram can rate-limit requests or restrict the account. No browser cookies or credentials are bundled with this fork. Report results in the Rockcorp fork. Upstream does not accept AI-authored contributions.
 
 Run the metadata regression tests with `python -m unittest test.test_instagram`.
+
+### HTTP worker
+
+Install `.[default,curl-cffi,rockcorp-api]` from this checkout. Set `YTDLP_API_TOKEN` to your worker credential, then run:
+
+```sh
+python -m uvicorn yt_dlp.rockcorp_api:app_factory --factory --host 0.0.0.0 --port 8080
+```
+
+`POST /instagram/creator` accepts `{"handle":"prettysoulstories"}` with `Authorization: Bearer YOUR_TOKEN`. Add `"include_posts":false` for a profile-only lookup. Responses include `observed_at_ms`. The worker permits two concurrent extractions, performs no paid-provider fallback, and returns HTTP 502 if extraction fails. `/health` reports process health.
+
+```sh
+docker build -f Dockerfile.rockcorp -t rockcorp-instagram-stats .
+docker run --rm -p 8080:8080 -e YTDLP_API_TOKEN rockcorp-instagram-stats
+```
+
+Expose the worker through HTTPS before connecting a remote Convex deployment. Configure Oblsk with `INSTAGRAM_YTDLP_URL` pointing to the worker and `INSTAGRAM_YTDLP_TOKEN` containing the same credential as `YTDLP_API_TOKEN`.
 
 <!-- MANPAGE: MOVE "USAGE AND OPTIONS" SECTION HERE -->
 

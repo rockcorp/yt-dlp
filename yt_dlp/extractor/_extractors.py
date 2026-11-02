@@ -788,6 +788,7 @@ from .inc import IncIE
 from .indavideo import IndavideoEmbedIE
 from .infoq import InfoQIE
 from .instagram import (
+    InstagramCreatorIE,
     InstagramIE,
     InstagramIOSIE,
     InstagramProfileIE,

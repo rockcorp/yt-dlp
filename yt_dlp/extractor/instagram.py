@@ -118,17 +118,36 @@ class InstagramBaseIE(InfoExtractor):
         for user in users:
             if (traverse_obj(user, ('username', {str.lower})) == username.lower()
                     and traverse_obj(user, ('pk', {str_or_none}))):
-                return user
+                profile = dict(user)
+                for candidate in users:
+                    if str(candidate.get('pk')) != str(user['pk']):
+                        continue
+                    for key in ('polaris_ordered_timeline_connection', 'polaris_clips_connection'):
+                        if isinstance(candidate.get(key), dict):
+                            profile[key] = candidate[key]
+                return profile
         raise ExtractorError('Instagram did not return the requested profile in the page', expected=True)
 
-    def _download_profile(self, username, expected_user_id=None):
+    def _download_profile_user(self, username, tab=''):
         username = username.lower()
-        if username not in self._profile_cache:
+        cache_key = f'{username}/{tab}'
+        if cache_key not in self._profile_cache:
             webpage = self._download_webpage(
-                f'{self._BASE_URL}{username}/', username, 'Downloading author profile',
+                f'{self._BASE_URL}{username}/{tab + "/" if tab else ""}', username, 'Downloading author profile',
                 impersonate=self._can_impersonate)
-            self._profile_cache[username] = self._extract_profile_data(webpage, username)
-        user = self._profile_cache[username]
+            user = self._extract_profile_data(webpage, username)
+            query = f'PolarisLoggedOutDesktopWWWProfile{"Reels" if tab == "reels" else "Posts"}TabContentQuery'
+            user['_pagination_doc_id'] = self._search_regex(
+                rf'"queryID":"(\d+)","variables":\{{[^{{}}]*\}},"queryName":"{query}"',
+                webpage, 'profile pagination query', default=None)
+            user['_lsd_token'] = self._search_regex(
+                r'\["LSD",\[\],\{"token":"([^"]+)"', webpage, 'LSD token', default=None)
+            self._profile_cache[cache_key] = user
+        return self._profile_cache[cache_key]
+
+    def _download_profile(self, username, expected_user_id=None, tab=''):
+        user = self._download_profile_user(username, tab)
+        username = username.lower()
         if expected_user_id is not None and str(user['pk']) != str(expected_user_id):
             raise ExtractorError('Instagram profile ID does not match the post author', expected=True)
         return {
@@ -244,6 +263,7 @@ class InstagramBaseIE(InfoExtractor):
                 'channel': ('user', 'username', {str}),
                 'uploader_id': ('user', 'pk', {str_or_none}),
                 'uploader': ('user', 'full_name', {str}),
+                'coauthor_uploader_ids': ('coauthor_producers', ..., 'pk', {str_or_none}),
                 'channel_follower_count': ('user', 'follower_count', {_parse_count}),
                 'channel_is_verified': ('user', 'is_verified', {bool}),
                 'timestamp': ('taken_at', {int_or_none}),
@@ -251,6 +271,9 @@ class InstagramBaseIE(InfoExtractor):
                 'view_count': (('view_count', 'play_count'), {_parse_count}, any),
                 'like_count': ('like_count', {_parse_count}),
                 'comment_count': ('comment_count', {_parse_count}),
+                'media_type': ('media_type', {int_or_none}),
+                'product_type': ('product_type', {str}),
+                'is_platform_ad': ('is_paid_partnership', {bool}),
                 'repost_count': ('media_repost_count', {_parse_count}),
                 'save_count': ('save_count', {_parse_count}),
             }),
@@ -505,7 +528,7 @@ class InstagramIE(InstagramBaseIE):
             entry.update(profile)
         return info
 
-    def _extract_post(self, url):
+    def _extract_post(self, url, metadata_only=False):
         video_id, url = self._match_valid_url(url).group('id', 'url')
         media_id = str(_id_to_pk(video_id))
 
@@ -599,7 +622,7 @@ class InstagramIE(InstagramBaseIE):
 
         info_dict = self._extract_product(product_info, video_id=video_id, get_comments=False)
         is_playlist = info_dict.get('_type') == 'playlist'
-        if not is_playlist and not info_dict.get('formats'):
+        if not metadata_only and not is_playlist and not info_dict.get('formats'):
             self.raise_no_formats('There is no video in this post', expected=True)
 
         comments = traverse_obj(media, (
@@ -635,6 +658,94 @@ class InstagramProfileIE(InstagramBaseIE):
         return self.playlist_result(
             [], profile['channel_id'], profile.get('uploader') or profile['channel'],
             profile.get('channel_description'), webpage_url=profile['channel_url'], **profile)
+
+
+class InstagramCreatorIE(InstagramBaseIE):
+    IE_NAME = 'instagram:creator'
+    IE_DESC = 'Instagram author and latest unpinned Reel statistics'
+    _VALID_URL = r'instagram:creator:(?P<id>[A-Za-z0-9_][A-Za-z0-9_.]*)$'
+    _TESTS = [{'url': 'instagram:creator:prettysoulstories', 'only_matching': True}]
+
+    def _recent_nodes(self, username, user, post_extractor):
+        connection = user.get('polaris_clips_connection')
+        seen, cursors = set(), set()
+        for _ in range(5):
+            if not isinstance(connection, dict) or not isinstance(connection.get('edges'), list):
+                raise ExtractorError('Instagram did not return the recent Reels connection', expected=True)
+            for node in traverse_obj(connection, ('edges', ..., 'node', {dict})):
+                if not traverse_obj(node, ('user', 'pk', {str_or_none})):
+                    raise ExtractorError('Instagram did not identify the Reel author', expected=True)
+                code = traverse_obj(node, ('code', {str}))
+                if not code or code in seen:
+                    continue
+                seen.add(code)
+                if str(user['pk']) in (node.get('clips_tab_pinned_user_ids') or []):
+                    continue
+                yield node
+            page_info = connection.get('page_info') or {}
+            if not page_info.get('has_next_page'):
+                return
+            cursor = page_info.get('end_cursor')
+            if not cursor or cursor in cursors or not user.get('_pagination_doc_id'):
+                raise ExtractorError('Instagram recent Reel pagination is unavailable', expected=True)
+            cursors.add(cursor)
+            response = post_extractor._download_json(
+                f'{self._BASE_URL}api/graphql', username, 'Downloading recent Reels page',
+                impersonate=self._can_impersonate, headers={
+                    **self._api_headers,
+                    'X-FB-LSD': post_extractor._lsd_token,
+                    'Referer': f'{self._BASE_URL}{username}/reels/',
+                }, data=urlencode_postdata({
+                    'lsd': post_extractor._lsd_token,
+                    'doc_id': user['_pagination_doc_id'],
+                    'variables': json.dumps({'username': username, 'first': 12, 'after': cursor}),
+                    'server_timestamps': 'true',
+                }))
+            next_user = traverse_obj(response, ('data', 'xig_user_by_username', {dict})) or {}
+            if str(next_user.get('pk')) != str(user['pk']):
+                raise ExtractorError('Instagram pagination returned a different account', expected=True)
+            connection = next_user.get('polaris_clips_connection')
+        raise ExtractorError('Recent Reel lookup exceeded its pagination limit', expected=True)
+
+    def _real_extract(self, url):
+        username = self._match_id(url).lower()
+        user = self._download_profile_user(username, 'reels')
+        if user.get('is_private'):
+            raise ExtractorError('Recent Reels of private profiles are unavailable', expected=True)
+        profile = self._download_profile(username, tab='reels')
+        post_extractor = InstagramIE(self._downloader)
+        post_extractor._lsd_token = user.get('_lsd_token')
+        post_extractor.initialize()
+        posts = []
+        for node in itertools.islice(self._recent_nodes(username, user, post_extractor), 10):
+            post_url = f'{self._BASE_URL}reel/{node["code"]}/'
+            info = post_extractor._extract_post(post_url, metadata_only=True)
+            owner_id = str(traverse_obj(node, ('user', 'pk')))
+            if info.get('uploader_id') != owner_id or info.get('id') != node['code']:
+                raise ExtractorError('Instagram post metadata does not match the requested Reel', expected=True)
+            if owner_id != str(user['pk']) and str(user['pk']) not in (info.get('coauthor_uploader_ids') or []):
+                raise ExtractorError('Instagram post does not list the requested account as an author', expected=True)
+            if not isinstance(info.get('timestamp'), int):
+                raise ExtractorError('Instagram did not return the Reel publish time', expected=True)
+            metrics = traverse_obj(node, {
+                'view_count': ('play_count', {_parse_count}),
+                'like_count': ('like_count', {_parse_count}),
+                'comment_count': ('comment_count', {_parse_count}),
+            })
+            posts.append({
+                **{key: info[key] for key in (
+                    'id', 'timestamp', 'description', 'like_count', 'comment_count', 'view_count',
+                    'is_platform_ad', 'repost_count', 'save_count',
+                ) if key in info},
+                **metrics,
+                'webpage_url': post_url,
+                'product_type': 'clips',
+            })
+        posts.sort(key=lambda post: post['timestamp'], reverse=True)
+        return self.playlist_result(
+            [], profile['channel_id'], profile.get('uploader') or profile['channel'],
+            profile.get('channel_description'), instagram_posts=posts,
+            webpage_url=profile['channel_url'], **profile)
 
 
 class InstagramPlaylistBaseIE(InstagramBaseIE):

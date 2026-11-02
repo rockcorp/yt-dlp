@@ -46,6 +46,10 @@ dynamic = ["version"]
 dependencies = []
 
 [project.optional-dependencies]
+rockcorp-api = [
+    "fastapi>=0.115,<1",
+    "uvicorn>=0.30,<1",
+]
 default = [
     "brotli ; implementation_name == 'cpython' and sys_platform != 'ios'",
     "brotlicffi ; implementation_name != 'cpython'",

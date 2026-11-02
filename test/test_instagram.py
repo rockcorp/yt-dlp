@@ -10,7 +10,7 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from test.helper import FakeYDL
 from yt_dlp.extractor import get_info_extractor
-from yt_dlp.extractor.instagram import InstagramIE, InstagramProfileIE
+from yt_dlp.extractor.instagram import InstagramCreatorIE, InstagramIE, InstagramProfileIE
 from yt_dlp.utils import ExtractorError
 
 
@@ -206,6 +206,94 @@ class TestInstagramProfile(unittest.TestCase):
             ):
                 self.assertEqual(ie._real_extract('url'), post)
                 warning.assert_called_once()
+
+
+class TestInstagramCreator(unittest.TestCase):
+    def setUp(self):
+        self.ie = InstagramCreatorIE(FakeYDL())
+        self.user = {
+            'pk': '123', 'username': 'creator', 'follower_count': 100,
+            '_pagination_doc_id': '12345',
+        }
+
+    def node(self, code, pinned=False, owner='123'):
+        return {
+            'code': code, 'user': {'pk': owner}, 'play_count': 0,
+            'like_count': 5, 'comment_count': 0,
+            'clips_tab_pinned_user_ids': ['123'] if pinned else [],
+        }
+
+    def connection(self, nodes, more=False, cursor=None):
+        return {'edges': [{'node': node} for node in nodes],
+                'page_info': {'has_next_page': more, 'end_cursor': cursor}}
+
+    def test_pagination_excludes_pins_and_duplicates(self):
+        user = {**self.user, 'polaris_clips_connection': self.connection([
+            self.node('pinned', pinned=True), self.node('first'), self.node('first'),
+        ], more=True, cursor='next')}
+        post_extractor = mock.Mock(_lsd_token='test-token')
+        post_extractor._download_json.return_value = {'data': {'xig_user_by_username': {
+            'pk': '123', 'polaris_clips_connection': self.connection([self.node('second')]),
+        }}}
+        posts = list(self.ie._recent_nodes('creator', user, post_extractor))
+        self.assertEqual([post['code'] for post in posts], ['first', 'second'])
+        self.assertIn(b'after', post_extractor._download_json.call_args.kwargs['data'])
+
+    def test_missing_owner_is_rejected(self):
+        user = {**self.user, 'polaris_clips_connection': self.connection([{'code': 'unknown'}])}
+        with self.assertRaisesRegex(ExtractorError, 'identify the Reel author'):
+            list(self.ie._recent_nodes('creator', user, mock.Mock()))
+
+    def test_collaborations_require_explicit_coauthor_membership(self):
+        user = {**self.user, 'polaris_clips_connection': self.connection([self.node('collab', owner='456')])}
+        for coauthors in ([], ['123']):
+            with (
+                self.subTest(coauthors=coauthors),
+                mock.patch.object(self.ie, '_download_profile_user', return_value=user),
+                mock.patch('yt_dlp.extractor.instagram.InstagramIE') as post_class,
+            ):
+                post_class.return_value._extract_post.return_value = {
+                    'id': 'collab', 'uploader_id': '456', 'timestamp': 1000,
+                    'coauthor_uploader_ids': coauthors,
+                }
+                if coauthors:
+                    self.assertEqual(len(self.ie._real_extract('instagram:creator:creator')['instagram_posts']), 1)
+                else:
+                    with self.assertRaisesRegex(ExtractorError, 'does not list'):
+                        self.ie._real_extract('instagram:creator:creator')
+
+    def test_incomplete_or_repeated_cursor_is_not_an_empty_profile(self):
+        for connection in (None, self.connection([], more=True)):
+            with self.subTest(connection=connection), self.assertRaises(ExtractorError):
+                list(self.ie._recent_nodes('creator', {**self.user, 'polaris_clips_connection': connection}, mock.Mock()))
+        user = {**self.user, 'polaris_clips_connection': self.connection([], more=True, cursor='repeat')}
+        post_extractor = mock.Mock(_lsd_token='test-token')
+        post_extractor._download_json.return_value = {'data': {'xig_user_by_username': {
+            'pk': '123', 'polaris_clips_connection': user['polaris_clips_connection'],
+        }}}
+        with self.assertRaisesRegex(ExtractorError, 'pagination is unavailable'):
+            list(self.ie._recent_nodes('creator', user, post_extractor))
+
+    def test_creator_snapshot_keeps_ten_posts_and_real_zero_views(self):
+        user = {**self.user, 'polaris_clips_connection': self.connection([self.node(f'post{i}') for i in range(12)])}
+
+        def post(url, metadata_only=False):
+            code = url.rstrip('/').split('/')[-1]
+            self.assertTrue(metadata_only)
+            return {'id': code, 'uploader_id': '123', 'timestamp': 1000 + int(code[4:]), 'description': 'Caption'}
+
+        with (
+            mock.patch.object(self.ie, '_download_profile_user', return_value=user),
+            mock.patch('yt_dlp.extractor.instagram.InstagramIE') as post_class,
+        ):
+            post_class.return_value._extract_post.side_effect = post
+            info = self.ie._real_extract('instagram:creator:creator')
+        self.assertEqual(info['channel_follower_count'], 100)
+        self.assertEqual(info['entries'], [])
+        self.assertEqual(len(info['instagram_posts']), 10)
+        self.assertEqual(info['instagram_posts'][0]['id'], 'post9')
+        self.assertTrue(all(post['view_count'] == 0 for post in info['instagram_posts']))
+        self.assertEqual(post_class.return_value._extract_post.call_count, 10)
 
 
 if __name__ == '__main__':
