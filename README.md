@@ -21,16 +21,25 @@ The `instagram-stats` branch adds metadata mappings to the existing Instagram ex
 
 * `view_count` uses Instagram's `view_count`, falling back to `play_count` when the view count is unavailable. The older GraphQL node parser also falls back from `video_view_count` to `video_play_count`. These counters can have different counting rules. They are never added together.
 * `channel_follower_count` and `channel_is_verified` use the user data included in the post response. `channel_url` and `uploader_url` link to that user's profile.
+* `instagram:profile:USERNAME` fetches author metadata from the public profile page without listing or downloading posts. It returns an empty playlist with `channel_follower_count`, `channel_following_count`, `channel_description`, `channel_bio_url`, and identity fields. `channel_post_count` is included only if Instagram supplies it. The following count, biography, bio URL, and post count are fork-specific metadata fields.
+* `--extractor-args 'instagram:author_stats'` attaches the same author fields to a post or Reel result. It makes one extra profile-page request per author per extractor instance and caches successful lookups. The returned handle and account ID must match the post author. Lookup failures produce a warning and preserve the post result.
 * `repost_count` uses `media_repost_count`. `save_count` uses `save_count` when provided. Reposts are not treated as share counts.
 * Missing, malformed, and negative counts remain unknown. A genuine zero stays zero.
 
-This branch makes no additional network requests. It does not add search, restore profile-feed extraction, or fetch private insights. Instagram's logged-out post responses omitted both view and play counts in our public-URL probes on November 2, 2026. A separate public profile-info probe returned HTTP 401. Mapping a field cannot recover data the server withholds. Authenticated extraction has unit coverage but has not been tested with a live account.
+Ordinary post extraction makes no additional network requests unless author stats are requested. This branch does not add search, restore profile-feed extraction, or fetch private insights. Instagram's logged-out post responses omitted both view and play counts in our public-URL probes on November 2, 2026. The profile-info API returned HTTP 401, but the public profile HTML supplied exact follower and following counts, biographies, and bio links without login. All three profiles tested returned a null post count. Authenticated extraction has unit coverage but has not been tested with a live account.
 
 Install this branch in a separate Python environment:
 
 ```sh
 python -m pip install 'yt-dlp[default,curl-cffi] @ git+https://github.com/rockcorp/yt-dlp.git@instagram-stats'
 yt-dlp --ignore-config --skip-download --dump-single-json 'https://www.instagram.com/reel/SHORTCODE/'
+```
+
+Fetch author stats directly, or include them with a Reel:
+
+```sh
+yt-dlp --ignore-config --dump-single-json 'instagram:profile:prettysoulstories'
+yt-dlp --ignore-config --skip-download --dump-single-json --extractor-args 'instagram:author_stats' 'https://www.instagram.com/reel/Dekn5A8hbRF/'
 ```
 
 For an authenticated test, add `--cookies-from-browser firefox` using an account you control. Instagram can rate-limit requests or restrict the account. No browser cookies or credentials are bundled with this fork. Report results in the Rockcorp fork. Upstream does not accept AI-authored contributions.
@@ -1938,6 +1947,7 @@ The following extractors use this feature:
 
 #### instagram
 * `app_id`: The value of the `X-IG-App-ID` header used for API requests. Can be the actual ID number, `ios`, or `web` (default)
+* `author_stats`: Fetch the author's public profile page and attach follower/following counts, biography, and bio link to post results. Available in the Rockcorp fork. Failures warn without discarding the post.
 
 #### niconicochannelplus
 * `max_comments`: Maximum number of comments to extract - default is `120`

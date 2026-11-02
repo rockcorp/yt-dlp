@@ -48,6 +48,7 @@ def _id_to_pk(shortcode):
 
 class InstagramBaseIE(InfoExtractor):
     _BASE_URL = 'https://www.instagram.com/'
+    _SJS_RE = re.compile(r'<script\b[^>]+\bdata-sjs>(\{.+?\})</script>')
     _APP_IDS = {
         'ios': '124024574287414',
         'web': '936619743392459',  # default
@@ -104,6 +105,48 @@ class InstagramBaseIE(InfoExtractor):
         return traverse_obj(
             media, (kind, 'count'), *((f'edge_media_{key}', 'count') for key in keys),
             expected_type=_parse_count)
+
+    @functools.cached_property
+    def _profile_cache(self):
+        return {}
+
+    def _extract_profile_data(self, webpage, username):
+        users = traverse_obj(webpage, (
+            {self._SJS_RE.findall}, ..., {lambda data: self._parse_json(data, username, fatal=False)},
+            'require', ..., ..., ..., '__bbox', 'require', ..., ..., ...,
+            '__bbox', 'result', 'data', 'xig_user_by_username', {dict}))
+        for user in users:
+            if (traverse_obj(user, ('username', {str.lower})) == username.lower()
+                    and traverse_obj(user, ('pk', {str_or_none}))):
+                return user
+        raise ExtractorError('Instagram did not return the requested profile in the page', expected=True)
+
+    def _download_profile(self, username, expected_user_id=None):
+        username = username.lower()
+        if username not in self._profile_cache:
+            webpage = self._download_webpage(
+                f'{self._BASE_URL}{username}/', username, 'Downloading author profile',
+                impersonate=self._can_impersonate)
+            self._profile_cache[username] = self._extract_profile_data(webpage, username)
+        user = self._profile_cache[username]
+        if expected_user_id is not None and str(user['pk']) != str(expected_user_id):
+            raise ExtractorError('Instagram profile ID does not match the post author', expected=True)
+        return {
+            'channel_url': f'{self._BASE_URL}{username}/',
+            'uploader_url': f'{self._BASE_URL}{username}/',
+            **traverse_obj(user, {
+                'channel': ('username', {str}),
+                'channel_id': ('pk', {str_or_none}),
+                'uploader_id': ('pk', {str_or_none}),
+                'uploader': ('full_name', {str}),
+                'channel_follower_count': ('follower_count', {_parse_count}),
+                'channel_following_count': ('following_count', {_parse_count}),
+                'channel_post_count': (('media_count', 'all_media_count'), {_parse_count}, any),
+                'channel_description': ('biography', {str}),
+                'channel_bio_url': ('bio_links', ..., 'url', {url_or_none}, any),
+                'channel_is_verified': ('is_verified', {bool}),
+            }),
+        }
 
     def _get_dimension(self, name, media, webpage=None):
         return (
@@ -418,8 +461,6 @@ class InstagramIE(InstagramBaseIE):
         'only_matching': True,
     }]
 
-    _SJS_RE = re.compile(r'<script\b[^>]+\bdata-sjs>(\{.+?\})</script>')
-
     _lsd_token = None
 
     @classmethod
@@ -447,6 +488,24 @@ class InstagramIE(InstagramBaseIE):
                 or self._search_regex(r'\["LSD",\[\],\{"token":"([^"]+)"', webpage, 'LSD token'))
 
     def _real_extract(self, url):
+        info = self._extract_post(url)
+        if not self._configuration_arg('author_stats'):
+            return info
+        username = info.get('channel')
+        if not username:
+            self.report_warning('The post response did not identify an author for profile lookup')
+            return info
+        try:
+            profile = self._download_profile(username, expected_user_id=info.get('uploader_id'))
+        except ExtractorError as error:
+            self.report_warning(f'Author stats unavailable: {error.msg}')
+            return info
+        info.update(profile)
+        for entry in info.get('entries') or []:
+            entry.update(profile)
+        return info
+
+    def _extract_post(self, url):
         video_id, url = self._match_valid_url(url).group('id', 'url')
         media_id = str(_id_to_pk(video_id))
 
@@ -560,6 +619,22 @@ class InstagramIE(InstagramBaseIE):
             info_dict['comments'] = comments
 
         return info_dict
+
+
+class InstagramProfileIE(InstagramBaseIE):
+    IE_NAME = 'instagram:profile'
+    IE_DESC = 'Instagram profile metadata without downloading posts'
+    _VALID_URL = r'instagram:profile:(?P<id>[A-Za-z0-9_][A-Za-z0-9_.]*)$'
+    _TESTS = [{
+        'url': 'instagram:profile:prettysoulstories',
+        'only_matching': True,
+    }]
+
+    def _real_extract(self, url):
+        profile = self._download_profile(self._match_id(url))
+        return self.playlist_result(
+            [], profile['channel_id'], profile.get('uploader') or profile['channel'],
+            profile.get('channel_description'), webpage_url=profile['channel_url'], **profile)
 
 
 class InstagramPlaylistBaseIE(InstagramBaseIE):

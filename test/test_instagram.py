@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 
 import os
+import json
 import sys
 import unittest
 from unittest import mock
@@ -8,7 +9,20 @@ from unittest import mock
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from test.helper import FakeYDL
-from yt_dlp.extractor.instagram import InstagramIE
+from yt_dlp.extractor import get_info_extractor
+from yt_dlp.extractor.instagram import InstagramIE, InstagramProfileIE
+from yt_dlp.utils import ExtractorError
+
+
+def profile_page(*users):
+    scripts = []
+    for user in users:
+        query = {'__bbox': {'result': {'data': {'xig_user_by_username': user}}}}
+        data = {'require': [['ScheduledServerJS', None, None, [{
+            '__bbox': {'require': [['RelayPrefetchedStreamCache', None, None, [None, query]]]},
+        }]]]}
+        scripts.append(f'<script type="application/json" data-sjs>{json.dumps(data)}</script>')
+    return ''.join(scripts)
 
 
 class TestInstagramMetadata(unittest.TestCase):
@@ -97,6 +111,101 @@ class TestInstagramMetadata(unittest.TestCase):
         self.assertEqual(info.get('like_count'), 10)
         self.assertEqual(download.call_count, 1)
         self.assertIn('/media/482584233761418119/info/', download.call_args.args[0])
+
+
+class TestInstagramProfile(unittest.TestCase):
+    def setUp(self):
+        self.ie = InstagramProfileIE(FakeYDL())
+        self.user = {
+            'pk': '123', 'username': 'creator', 'full_name': 'A Creator',
+            'follower_count': 1234, 'following_count': 56, 'all_media_count': None,
+            'biography': 'Creator biography', 'is_verified': False,
+            'bio_links': [{'url': 'https://example.com/'}],
+        }
+
+    def test_standalone_profile(self):
+        self.assertIs(get_info_extractor('InstagramProfile'), InstagramProfileIE)
+        page = profile_page({'pk': '123', 'username': 'unrelated'}, self.user, {'pk': '123'})
+        with mock.patch.object(self.ie, '_download_webpage', return_value=page) as download:
+            info = self.ie._real_extract('instagram:profile:Creator')
+        self.assertEqual(info['id'], '123')
+        self.assertEqual(info['entries'], [])
+        self.assertEqual(info['channel_follower_count'], 1234)
+        self.assertEqual(info['channel_following_count'], 56)
+        self.assertEqual(info['channel_description'], 'Creator biography')
+        self.assertEqual(info['channel_bio_url'], 'https://example.com/')
+        self.assertEqual(info['description'], 'Creator biography')
+        self.assertNotIn('channel_post_count', info)
+        self.assertIs(info['channel_is_verified'], False)
+        self.assertEqual(download.call_args.args[0], 'https://www.instagram.com/creator/')
+
+    def test_profile_cache_and_author_identity(self):
+        with mock.patch.object(self.ie, '_download_webpage', return_value=profile_page(self.user)) as download:
+            self.ie._download_profile('Creator', expected_user_id='123')
+            self.ie._download_profile('creator', expected_user_id=123)
+            with self.assertRaisesRegex(ExtractorError, 'does not match'):
+                self.ie._download_profile('creator', expected_user_id='456')
+        self.assertEqual(download.call_count, 1)
+
+    def test_profile_counts(self):
+        for value, expected in ((0, 0), ('25', 25), (None, None), (-1, None), (True, None)):
+            with self.subTest(value=value):
+                ie = InstagramProfileIE(FakeYDL())
+                user = {**self.user, 'follower_count': value, 'following_count': value, 'all_media_count': value}
+                with mock.patch.object(ie, '_download_webpage', return_value=profile_page(user)):
+                    info = ie._download_profile('creator')
+                for field in ('channel_follower_count', 'channel_following_count', 'channel_post_count'):
+                    self.assertEqual(info.get(field), expected)
+
+    def test_profile_must_match_requested_account(self):
+        for page in (
+            '<html>Log in to Instagram</html>',
+            profile_page({'pk': '456', 'username': 'someone_else'}),
+            profile_page({'username': 'creator'}),
+        ):
+            with self.subTest(page=page), self.assertRaisesRegex(ExtractorError, 'requested profile'):
+                self.ie._extract_profile_data(page, 'creator')
+
+    def test_author_enrichment_is_optional(self):
+        ie = InstagramIE(FakeYDL())
+        post = {'id': 'post', 'channel': 'creator', 'uploader_id': '123'}
+        with (
+            mock.patch.object(ie, '_extract_post', return_value=post),
+            mock.patch.object(ie, '_download_profile') as download,
+        ):
+            self.assertEqual(ie._real_extract('url'), post)
+        download.assert_not_called()
+
+    def test_post_and_carousel_enrichment(self):
+        for carousel in (False, True):
+            with self.subTest(carousel=carousel):
+                ie = InstagramIE(FakeYDL({'extractor_args': {'instagram': {'author_stats': ['true']}}}))
+                post = {'id': 'post', 'channel': 'creator', 'uploader_id': '123', 'description': 'Post caption'}
+                if carousel:
+                    post.update({'_type': 'playlist', 'entries': [{'id': 'child', 'like_count': 10}]})
+                with (
+                    mock.patch.object(ie, '_extract_post', return_value=post),
+                    mock.patch.object(ie, '_download_webpage', return_value=profile_page(self.user)),
+                ):
+                    info = ie._real_extract('url')
+                self.assertEqual(info['channel_follower_count'], 1234)
+                self.assertEqual(info['description'], 'Post caption')
+                if carousel:
+                    self.assertEqual(info['entries'][0]['channel_follower_count'], 1234)
+                    self.assertEqual(info['entries'][0]['like_count'], 10)
+
+    def test_failed_profile_lookup_preserves_post(self):
+        ie = InstagramIE(FakeYDL({'extractor_args': {'instagram': {'author_stats': ['true']}}}))
+        post = {'id': 'post', 'channel': 'creator', 'uploader_id': '123', 'like_count': 10}
+        for error in ('HTTP Error 429', 'Instagram profile ID does not match the post author'):
+            with (
+                self.subTest(error=error),
+                mock.patch.object(ie, '_extract_post', return_value=dict(post)),
+                mock.patch.object(ie, '_download_profile', side_effect=ExtractorError(error)),
+                mock.patch.object(ie, 'report_warning') as warning,
+            ):
+                self.assertEqual(ie._real_extract('url'), post)
+                warning.assert_called_once()
 
 
 if __name__ == '__main__':
