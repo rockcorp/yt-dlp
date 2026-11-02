@@ -229,7 +229,7 @@ class TestInstagramProfile(unittest.TestCase):
 
 class TestInstagramCreator(unittest.TestCase):
     def setUp(self):
-        self.ie = InstagramCreatorIE(FakeYDL())
+        self.ie = InstagramCreatorIE(FakeYDL({'extractor_args': {'instagramcreator': {'tab': ['reels']}}}))
         self.user = {
             'pk': '123', 'username': 'creator', 'follower_count': 100,
             '_pagination_doc_id': '12345',
@@ -260,7 +260,7 @@ class TestInstagramCreator(unittest.TestCase):
 
     def test_missing_owner_is_rejected(self):
         user = {**self.user, 'polaris_clips_connection': self.connection([{'code': 'unknown'}])}
-        with self.assertRaisesRegex(ExtractorError, 'identify the Reel author'):
+        with self.assertRaisesRegex(ExtractorError, 'identify the post author'):
             list(self.ie._recent_nodes('creator', user, mock.Mock()))
 
     def test_collaborations_require_explicit_coauthor_membership(self):
@@ -313,6 +313,67 @@ class TestInstagramCreator(unittest.TestCase):
         self.assertEqual(info['instagram_posts'][0]['id'], 'post9')
         self.assertTrue(all(post['view_count'] == 0 for post in info['instagram_posts']))
         self.assertEqual(post_class.return_value._extract_post.call_count, 10)
+
+
+class TestInstagramMixedFeed(unittest.TestCase):
+    def node(self, code, product_type='feed'):
+        return {'code': code, 'product_type': product_type, 'user': {'username': 'creator'}}
+
+    def test_feed_default_keeps_photos_carousels_and_reels_in_chronological_order(self):
+        ie = InstagramCreatorIE(FakeYDL())
+        kinds = ('feed', 'carousel_container', 'clips')
+        nodes = [self.node(f'post{i}', kinds[i % 3]) for i in range(13)]
+        user = {'pk': '123', 'username': 'creator', 'follower_count': 100,
+                'polaris_ordered_timeline_connection': {'edges': [{'node': node} for node in nodes],
+                                                       'page_info': {'has_next_page': False}}}
+        clips = [{'code': node['code'], 'user': {'pk': '123'}, 'play_count': 0,
+                  'clips_tab_pinned_user_ids': ['123']} for node in nodes[3:] if node['product_type'] == 'clips']
+        reels_user = {**user, 'polaris_clips_connection': {
+            'edges': [{'node': node} for node in clips], 'page_info': {'has_next_page': False}}}
+
+        def profile(username, tab=''):
+            return reels_user if tab == 'reels' else user
+
+        def post(url, metadata_only=False):
+            code = url.rstrip('/').split('/')[-1]
+            index = int(code[4:])
+            return {'id': code, 'uploader_id': '123', 'channel': 'creator',
+                    'timestamp': index if index < 3 else 2000 - index,
+                    'product_type': kinds[index % 3], 'like_count': index,
+                    'media_type': {'feed': 1, 'carousel_container': 8, 'clips': 2}[kinds[index % 3]]}
+
+        with (mock.patch.object(ie, '_download_profile_user', side_effect=profile),
+              mock.patch('yt_dlp.extractor.instagram.InstagramIE') as post_class):
+            post_class.return_value._extract_post.side_effect = post
+            result = ie._real_extract('instagram:creator:creator')
+        posts = result['instagram_posts']
+        self.assertEqual(result['instagram_post_tab'], 'feed')
+        self.assertEqual([post['id'] for post in posts], [f'post{i}' for i in range(3, 13)])
+        self.assertEqual({post['product_type'] for post in posts}, set(kinds))
+        self.assertEqual(post_class.return_value._extract_post.call_count, 13)
+        for post in posts:
+            if post['product_type'] == 'clips':
+                self.assertEqual(post['view_count'], 0)
+            else:
+                self.assertNotIn('view_count', post)
+
+    def test_feed_pagination_uses_the_feed_connection_and_scoped_owner_handle(self):
+        ie = InstagramCreatorIE(FakeYDL())
+        user = {'pk': '123', 'username': 'creator', '_pagination_doc_id': 'feed-query',
+                'polaris_ordered_timeline_connection': {'edges': [{'node': self.node('photo')}],
+                                                       'page_info': {'has_next_page': True, 'end_cursor': 'next'}}}
+        post_extractor = mock.Mock(_lsd_token='test-token')
+        post_extractor._download_json.return_value = {'data': {'xig_user_by_username': {
+            'pk': '123', 'polaris_ordered_timeline_connection': {
+                'edges': [{'node': self.node('carousel', 'carousel_container')}],
+                'page_info': {'has_next_page': False},
+            },
+        }}}
+        nodes = list(ie._recent_nodes('creator', user, post_extractor, tab='feed'))
+        self.assertEqual([node['code'] for node in nodes], ['photo', 'carousel'])
+        self.assertEqual(post_extractor._download_json.call_args.kwargs['headers']['Referer'],
+                         'https://www.instagram.com/creator/')
+        self.assertIn(b'PolarisSEOIsCrawler', post_extractor._download_json.call_args.kwargs['data'])
 
 
 if __name__ == '__main__':

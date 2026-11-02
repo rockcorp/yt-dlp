@@ -34,7 +34,17 @@ class TestRockcorpApi(unittest.TestCase):
                 response = self.client.post('/instagram/creator', headers=self.headers,
                                             json={'handle': 'creator', 'include_posts': include_posts})
                 self.assertEqual(response.status_code, 200)
-                extract.assert_called_with('creator', include_posts)
+                extract.assert_called_with('creator', include_posts, 'feed')
+
+    def test_reels_mode_is_explicit_and_invalid_modes_are_rejected(self):
+        with mock.patch('yt_dlp.rockcorp_api.extract_snapshot', return_value={}) as extract:
+            response = self.client.post('/instagram/creator', headers=self.headers,
+                                        json={'handle': 'creator', 'post_tab': 'reels'})
+            self.assertEqual(response.status_code, 200)
+            extract.assert_called_once_with('creator', True, 'reels')
+            invalid = self.client.post('/instagram/creator', headers=self.headers,
+                                       json={'handle': 'creator', 'post_tab': '../feed'})
+            self.assertEqual(invalid.status_code, 422)
 
     def test_failures_release_worker_capacity(self):
         with mock.patch('yt_dlp.rockcorp_api.extract_snapshot', side_effect=[DownloadError('Unavailable'), {}]):

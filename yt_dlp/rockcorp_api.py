@@ -4,6 +4,7 @@ import hmac
 import os
 import threading
 import time
+from typing import Literal
 
 from fastapi import FastAPI, Header, HTTPException
 from pydantic import BaseModel, Field
@@ -15,19 +16,22 @@ from .utils import DownloadError
 class CreatorRequest(BaseModel):
     handle: str = Field(min_length=1, max_length=30, pattern=r'^[A-Za-z0-9_][A-Za-z0-9_.]*$')
     include_posts: bool = True
+    post_tab: Literal['feed', 'reels'] = 'feed'
 
 
-def extract_snapshot(handle, include_posts=True):
+def extract_snapshot(handle, include_posts=True, post_tab='feed'):
     with YoutubeDL({
         'quiet': True,
         'skip_download': True,
         'socket_timeout': 12,
         'retries': 0,
         'extractor_retries': 0,
+        'extractor_args': {'instagramcreator': {'tab': [post_tab]}},
     }) as ydl:
         command = 'creator' if include_posts else 'profile'
         result = ydl.extract_info(f'instagram:{command}:{handle}', download=False)
     result.setdefault('instagram_posts', [])
+    result.setdefault('instagram_post_tab', post_tab)
     result['observed_at_ms'] = int(time.time() * 1000)
     return result
 
@@ -50,7 +54,7 @@ def create_app(token):
         if not capacity.acquire(timeout=240):
             raise HTTPException(status_code=503, detail='Instagram worker is busy')
         try:
-            return extract_snapshot(request.handle, request.include_posts)
+            return extract_snapshot(request.handle, request.include_posts, request.post_tab)
         except DownloadError as error:
             raise HTTPException(status_code=502, detail='Instagram creator snapshot unavailable') from error
         finally:

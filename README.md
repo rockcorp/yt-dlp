@@ -25,7 +25,8 @@ The `instagram-stats` branch adds metadata mappings to the existing Instagram ex
 * `--extractor-args 'instagram:author_stats'` attaches the same author fields to a post or Reel result. It makes one extra profile-page request per author per extractor instance and caches successful lookups. The returned handle and account ID must match the post author. Lookup failures produce a warning and preserve the post result.
 * `repost_count` uses `media_repost_count`. `save_count` uses `save_count` when provided. Reposts are not treated as share counts.
 * Missing, malformed, and negative counts remain unknown. A genuine zero stays zero.
-* `instagram:creator:USERNAME` returns an author snapshot and up to ten recent unpinned Reels in `instagram_posts`. It reads plays, likes, and comments from the public Reels tab, paginates past pinned Reels, and fetches each Reel's caption and publish timestamp. It downloads no media. Collaboration posts require explicit coauthor membership.
+* `instagram:creator:USERNAME` defaults to the mixed profile feed. It fetches thirteen candidates, sorts them by publish time, and returns the newest ten in `instagram_posts`. Photos and carousels each remain one post. It attaches available Reel play counts without replacing feed posts with more Reels. Missing photo/carousel views remain unknown. Public feed responses do not expose pin flags, so chronological selection displaces old pins but cannot guarantee exclusion of recently pinned posts.
+* `--extractor-args 'instagramcreator:tab=reels'` selects ten unpinned Reels instead. Discovery uses this mode explicitly. Both modes return `instagram_post_tab` and require verified author or coauthor membership. Neither downloads media.
 
 Ordinary post extraction makes no additional network requests unless author stats are requested. The creator command performs its own profile, pagination, and post-metadata requests. This branch does not add search, restore the old profile-feed downloader, or fetch private insights. The Reels tab supplies play counts that individual logged-out post responses omit. Public profile HTML supplies follower and following counts, biographies, and bio links without login. The profiles tested returned a null total post count. Shares and saves were unavailable in the public responses tested. Authenticated extraction has unit coverage but has not been tested with a live account.
 
@@ -41,6 +42,7 @@ Fetch author stats directly, or include them with a Reel:
 ```sh
 yt-dlp --ignore-config --dump-single-json 'instagram:profile:prettysoulstories'
 yt-dlp --ignore-config --dump-single-json 'instagram:creator:prettysoulstories'
+yt-dlp --ignore-config --dump-single-json --extractor-args 'instagramcreator:tab=reels' 'instagram:creator:prettysoulstories'
 yt-dlp --ignore-config --skip-download --dump-single-json --extractor-args 'instagram:author_stats' 'https://www.instagram.com/reel/Dekn5A8hbRF/'
 ```
 
@@ -56,7 +58,7 @@ Install `.[default,curl-cffi,rockcorp-api]` from this checkout. Set `YTDLP_API_T
 python -m uvicorn yt_dlp.rockcorp_api:app_factory --factory --host 0.0.0.0 --port 8080
 ```
 
-`POST /instagram/creator` accepts `{"handle":"prettysoulstories"}` with `Authorization: Bearer YOUR_TOKEN`. Add `"include_posts":false` for a profile-only lookup. Responses include `observed_at_ms`. The worker permits two concurrent extractions, performs no paid-provider fallback, and returns HTTP 502 if extraction fails. `/health` reports process health.
+`POST /instagram/creator` accepts `{"handle":"prettysoulstories"}` with `Authorization: Bearer YOUR_TOKEN`. `post_tab` defaults to `"feed"`; set it to `"reels"` for discovery. Add `"include_posts":false` for a profile-only lookup. Responses include `observed_at_ms` and `instagram_post_tab`. The app checks the returned mode to prevent using a Reels sample for mixed-feed metrics. The worker permits two concurrent extractions, performs no paid-provider fallback, and returns HTTP 502 if extraction fails. `/health` reports process health.
 
 ```sh
 docker build -f Dockerfile.rockcorp -t rockcorp-instagram-stats .
