@@ -273,7 +273,6 @@ class InstagramBaseIE(InfoExtractor):
                 'comment_count': ('comment_count', {_parse_count}),
                 'media_type': ('media_type', {int_or_none}),
                 'product_type': ('product_type', {str}),
-                'is_platform_ad': ('is_paid_partnership', {bool}),
                 'repost_count': ('media_repost_count', {_parse_count}),
                 'save_count': ('save_count', {_parse_count}),
             }),
@@ -282,6 +281,9 @@ class InstagramBaseIE(InfoExtractor):
             },
         }
 
+        ad_flags = traverse_obj(product_info, (('is_ad', 'is_paid_partnership'), {bool}))
+        if ad_flags:
+            info_dict['is_platform_ad'] = any(ad_flags)
         if username := traverse_obj(product_info, ('user', 'username', {str})):
             info_dict['channel_url'] = info_dict['uploader_url'] = f'https://www.instagram.com/{username}/'
 
@@ -531,6 +533,26 @@ class InstagramIE(InstagramBaseIE):
     def _extract_post(self, url, metadata_only=False):
         video_id, url = self._match_valid_url(url).group('id', 'url')
         media_id = str(_id_to_pk(video_id))
+
+        if metadata_only and not self._is_logged_in and self._can_impersonate:
+            response = self._download_json(
+                f'{self._BASE_URL}api/graphql', video_id, 'Downloading post metadata', fatal=False,
+                impersonate=True, headers={
+                    **self._api_headers,
+                    'X-FB-LSD': self._lsd_token,
+                    'Referer': url,
+                }, data=urlencode_postdata({
+                    'lsd': self._lsd_token,
+                    'doc_id': '27128499623469141',
+                    'variables': json.dumps({
+                        'shortcode': video_id,
+                        '__relay_internal__pv__PolarisAIGMMediaWebLabelEnabledrelayprovider': False,
+                    }),
+                    'server_timestamps': 'true',
+                }))
+            product = traverse_obj(response, ('data', 'xdt_api__v1__media__shortcode__web_info', 'items', 0, {dict}))
+            if product:
+                return self._extract_product(product, video_id=video_id, get_comments=False)
 
         if self._is_logged_in:
             try:

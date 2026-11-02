@@ -88,6 +88,25 @@ class TestInstagramMetadata(unittest.TestCase):
         self.assertNotIn('channel_follower_count', self.product(user={'follower_count': -1}))
         self.assertNotIn('channel_url', self.product(user={}))
 
+    def test_ad_flags_remain_unknown_unless_provided(self):
+        self.assertNotIn('is_platform_ad', self.product())
+        self.assertIs(self.product(is_ad=True, is_paid_partnership=False)['is_platform_ad'], True)
+        self.assertIs(self.product(is_paid_partnership=False)['is_platform_ad'], False)
+
+    def test_metadata_lookup_supports_photos_without_downloading_media(self):
+        self.ie.__dict__['_can_impersonate'] = True
+        self.ie._lsd_token = 'test-token'
+        with mock.patch.object(self.ie, '_download_json', return_value={'data': {
+            'xdt_api__v1__media__shortcode__web_info': {'items': [{
+                'pk': '482584233761418119', 'taken_at': 1000,
+                'like_count': 10, 'is_paid_partnership': False,
+            }]},
+        }}) as download:
+            info = self.ie._extract_post('https://www.instagram.com/p/aye83DjauH/', metadata_only=True)
+        self.assertEqual(info['like_count'], 10)
+        self.assertEqual(info['formats'], [])
+        self.assertEqual(download.call_count, 1)
+
     def test_carousel_keeps_post_counts(self):
         info = self.product(like_count=10, comment_count=2, carousel_media=[
             {'pk': '482584233761418119'}, {'pk': '482584233761418120'},
