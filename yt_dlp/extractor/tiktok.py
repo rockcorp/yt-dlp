@@ -37,6 +37,11 @@ from ..utils import (
 from ..utils.traversal import find_element, require, traverse_obj
 
 
+def _parse_count(value):
+    count = None if isinstance(value, bool) else int_or_none(value)
+    return count if count is not None and count >= 0 else None
+
+
 class TikTokBaseIE(InfoExtractor):
     _UPLOADER_URL_FORMAT = 'https://www.tiktok.com/@%s'
     _WEBPAGE_HOST = 'https://www.tiktok.com/'
@@ -117,6 +122,30 @@ class TikTokBaseIE(InfoExtractor):
             r'<script[^>]+\bid="__UNIVERSAL_DATA_FOR_REHYDRATION__"[^>]*>', webpage,
             'universal data', display_id, end_pattern=r'</script>', default={}),
             ('__DEFAULT_SCOPE__', {dict})) or {}
+
+    def _parse_profile_metadata(self, detail):
+        metadata = traverse_obj(detail, ('userInfo', 'user', {
+            'uploader': ('uniqueId', {str}),
+            'uploader_id': ('id', {str_or_none}),
+            'channel': ('nickname', {str}),
+            'channel_id': ('secUid', {str}),
+            'description': ('signature', {str}),
+            'channel_description': ('signature', {str}),
+            'channel_is_verified': ('verified', {bool}),
+            'channel_bio_url': ('bioLink', 'link', {url_or_none}),
+        })) or {}
+        for field, names in {
+            'channel_follower_count': ('followerCount',),
+            'channel_following_count': ('followingCount',),
+            'channel_like_count': ('heartCount', 'heart'),
+            'channel_post_count': ('videoCount',),
+        }.items():
+            count = traverse_obj(detail, ('userInfo', ('statsV2', 'stats'), names, {_parse_count}, any))
+            if count is not None:
+                metadata[field] = count
+        if username := metadata.get('uploader'):
+            metadata['channel_url'] = metadata['uploader_url'] = self._UPLOADER_URL_FORMAT % username
+        return metadata
 
     def _call_api_impl(self, ep, video_id, query=None, data=None, headers=None, fatal=True,
                        note='Downloading API JSON', errnote='Unable to download API page'):
@@ -1168,6 +1197,7 @@ class TikTokUserIE(TikTokBaseIE):
 
     def _real_extract(self, url):
         user_name, sec_uid = self._match_id(url), None
+        detail = {}
         if re.fullmatch(r'MS4wLjABAAAA[\w-]{64}', user_name):
             user_name, sec_uid = None, user_name
             fail_early = True
@@ -1197,7 +1227,133 @@ class TikTokUserIE(TikTokBaseIE):
                 'from a video posted by this user, try using "tiktokuser:channel_id" as the '
                 'input URL (replacing `channel_id` with its actual value)', expected=True)
 
-        return self.playlist_result(self._entries(sec_uid, user_name, fail_early), sec_uid, user_name)
+        return self.playlist_result(
+            self._entries(sec_uid, user_name, fail_early), sec_uid, user_name,
+            **self._parse_profile_metadata(detail))
+
+
+class TikTokProfileIE(TikTokUserIE):
+    IE_NAME = 'tiktok:profile'
+    IE_DESC = 'TikTok public profile metadata without downloading posts'
+    _VALID_URL = r'tiktok:profile:(?P<id>[\w.-]+)$'
+    _TESTS = [{'url': 'tiktok:profile:mrbeast', 'only_matching': True}]
+
+    def _download_profile_data(self, username):
+        webpage = self._download_webpage(
+            self._UPLOADER_URL_FORMAT % username, username, 'Downloading user profile',
+            impersonate=True, headers=self._generate_blockbuster_headers())
+        detail = traverse_obj(self._get_universal_data(webpage, username), ('webapp.user-detail', {dict})) or {}
+        if detail.get('statusCode') == 10222:
+            self.raise_login_required('TikTok requires login to access this profile')
+        if detail.get('statusCode') not in (None, 0):
+            raise ExtractorError(f'TikTok profile unavailable, status {detail.get("statusCode")}', expected=True)
+        metadata = self._parse_profile_metadata(detail)
+        if (not re.fullmatch(r'\d+', metadata.get('uploader_id', ''))
+                or metadata.get('uploader', '').lower() != username.lower()):
+            raise ExtractorError('TikTok did not return the requested author profile', expected=True)
+        return detail, metadata
+
+    def _real_extract(self, url):
+        _, profile = self._download_profile_data(self._match_id(url))
+        return self.playlist_result(
+            [], profile['uploader_id'], profile.get('channel') or profile['uploader'],
+            webpage_url=profile['uploader_url'], **profile)
+
+
+class TikTokCreatorIE(TikTokProfileIE):
+    IE_NAME = 'tiktok:creator'
+    IE_DESC = 'TikTok author and latest mixed-post statistics without downloading media'
+    _VALID_URL = r'tiktok:creator:(?P<id>[\w.-]+)$'
+    _TESTS = [{'url': 'tiktok:creator:pheangseve', 'only_matching': True}]
+
+    def _post_metadata(self, item, profile):
+        post_id = traverse_obj(item, ('id', {str_or_none}))
+        owner_id = traverse_obj(item, ('author', 'id', {str_or_none}))
+        owner_handle = traverse_obj(item, ('author', 'uniqueId', {str.lower}))
+        if (not post_id or not post_id.isdigit() or owner_id != profile['uploader_id']
+                or owner_handle != profile['uploader'].lower()):
+            raise ExtractorError('TikTok returned a post belonging to a different author', expected=True)
+        timestamp = _parse_count(item.get('createTime'))
+        if not timestamp:
+            raise ExtractorError('TikTok did not return the post publish time', expected=True)
+        images = traverse_obj(item, ('imagePost', 'images', ..., {dict})) or []
+        if item.get('imagePost') and not images:
+            raise ExtractorError('TikTok did not return the photo post images', expected=True)
+        post = {
+            'id': post_id,
+            'timestamp': timestamp,
+            'media_type': 'image' if images else 'video',
+            'webpage_url': f'https://www.tiktok.com/@{profile["uploader"]}/{"photo" if images else "video"}/{post_id}',
+            **traverse_obj(item, {
+                'title': ('desc', {truncate_string(left=72)}),
+                'description': ('desc', {str}),
+                'is_platform_ad': ('isAd', {bool}),
+            }),
+        }
+        if images:
+            post['image_count'] = len(images)
+        for field, key in {
+            'view_count': 'playCount',
+            'like_count': 'diggCount',
+            'comment_count': 'commentCount',
+            'share_count': 'shareCount',
+            'save_count': 'collectCount',
+            'repost_count': 'repostCount',
+            'download_count': 'downloadCount',
+        }.items():
+            count = traverse_obj(item, (('statsV2', 'stats'), key, {_parse_count}, any))
+            if count is not None:
+                post[field] = count
+        return post
+
+    def _recent_posts(self, profile):
+        if profile.get('channel_post_count') == 0:
+            return []
+        sec_uid = profile.get('channel_id')
+        if not sec_uid:
+            raise ExtractorError('TikTok did not return the secondary author ID', expected=True)
+        cursor, seen_ids, posts = int(time.time() * 1000), set(), []
+        for page in range(1, 6):
+            response = self._download_json(
+                self._API_BASE_URL, profile['uploader'], f'Downloading recent posts page {page}',
+                query=self._build_web_query(sec_uid, cursor))
+            if (not isinstance(response, dict) or response.get('statusCode') not in (None, 0)
+                    or not isinstance(response.get('itemList'), list)):
+                raise ExtractorError('TikTok did not return a valid recent-post response', expected=True)
+            items = response['itemList']
+            previous_count = len(seen_ids)
+            for item in items:
+                post_id = traverse_obj(item, ('id', {str_or_none}))
+                if not post_id or not post_id.isdigit():
+                    raise ExtractorError('TikTok returned a post without a valid ID', expected=True)
+                if post_id in seen_ids:
+                    continue
+                seen_ids.add(post_id)
+                if item.get('isPinnedItem') is True:
+                    continue
+                posts.append(self._post_metadata(item, profile))
+            if items and len(seen_ids) == previous_count:
+                raise ExtractorError('TikTok returned a repeated recent-post page', expected=True)
+            if len(posts) >= 10 or response.get('hasMorePrevious') is False:
+                if not posts and profile.get('channel_post_count', 0) > 0:
+                    raise ExtractorError('TikTok returned no public posts for a nonempty profile', expected=True)
+                return sorted(posts, key=lambda post: post['timestamp'], reverse=True)[:10]
+            if not isinstance(response.get('hasMorePrevious'), bool):
+                raise ExtractorError('TikTok did not return recent-post pagination status', expected=True)
+            timestamps = traverse_obj(items, (lambda _, item: item.get('isPinnedItem') is not True,
+                                             'createTime', {_parse_count}))
+            next_cursor = min(timestamps) * 1000 if timestamps else cursor
+            cursor = next_cursor if 0 < next_cursor < cursor else cursor - 7 * 86_400_000
+        raise ExtractorError('TikTok recent-post lookup exceeded its pagination limit', expected=True)
+
+    def _real_extract(self, url):
+        detail, profile = self._download_profile_data(self._match_id(url))
+        if traverse_obj(detail, ('userInfo', 'user', 'privateAccount')) is True:
+            self.raise_login_required('Recent posts of private TikTok profiles require login')
+        posts = self._recent_posts(profile)
+        return self.playlist_result(
+            [], profile['uploader_id'], profile.get('channel') or profile['uploader'],
+            webpage_url=profile['uploader_url'], tiktok_posts=posts, **profile)
 
 
 class TikTokBaseListIE(TikTokBaseIE):  # XXX: Conventionally, base classes should end with BaseIE/InfoExtractor

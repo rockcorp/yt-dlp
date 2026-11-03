@@ -1972,9 +1972,11 @@ from .threespeak import (
 from .tiktok import (
     DouyinIE,
     TikTokCollectionIE,
+    TikTokCreatorIE,
     TikTokEffectIE,
     TikTokIE,
     TikTokLiveIE,
+    TikTokProfileIE,
     TikTokSoundIE,
     TikTokTagIE,
     TikTokUserIE,

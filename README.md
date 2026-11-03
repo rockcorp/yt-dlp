@@ -50,6 +50,39 @@ For an authenticated test, add `--cookies-from-browser firefox` using an account
 
 Run the metadata regression tests with `python -m unittest test.test_instagram`.
 
+## Rockcorp TikTok stats experiment
+
+The same branch adds two commands for public TikTok creator statistics:
+
+```sh
+yt-dlp --ignore-config --dump-single-json 'tiktok:profile:mrbeast'
+yt-dlp --ignore-config --dump-single-json 'tiktok:creator:pheangseve'
+```
+
+Both return an empty playlist with author metadata. The creator command also returns `tiktok_posts`, with up to ten recent posts sorted newest first. Videos and photo posts share the same list. A photo carousel counts as one post. These commands do not request media formats or subtitles, and they do not download media.
+
+Author fields include `channel_follower_count`, `channel_following_count`, `channel_like_count`, `channel_post_count`, `channel_description`, `channel_bio_url`, and `channel_is_verified`. The numeric account ID is `uploader_id` and the playlist `id`. TikTok's opaque secondary account ID remains `channel_id`. The normal profile URL extractor also attaches these author fields when its existing webpage request supplies them, preserving its secondary-ID playlist identity.
+
+Each recent post includes its ID, publish timestamp, URL, description, and `media_type`. Photo posts use `media_type=image` and include `image_count`. Available counters map as follows:
+
+| Output field | TikTok field |
+| --- | --- |
+| `view_count` | `playCount` |
+| `like_count` | `diggCount` |
+| `comment_count` | `commentCount` |
+| `share_count` | `shareCount` |
+| `save_count` | `collectCount` |
+| `repost_count` | `repostCount` |
+| `download_count` | `downloadCount` |
+
+The metadata commands prefer `statsV2` counters over rounded `stats` values, with fallback for each field. Missing or invalid counters remain absent, and genuine zero values remain zero. In `tiktok_posts`, shares and reposts are separate. The existing video extractor's legacy `repost_count` mapping to `shareCount` is unchanged.
+
+The creator command checks the profile identity and each post's author, skips explicitly pinned posts and duplicate IDs, and limits pagination to five requests. Missing pin flags cannot guarantee exclusion of pinned posts. Private profiles, malformed responses, and repeated pages produce errors instead of an empty snapshot. A profile that reports zero posts returns an empty list without a feed request.
+
+Live tests without cookies returned author stats and ten-post snapshots for video-only and mixed profiles. The mixed snapshot included six photo posts, all with view counts. Download counts were absent in those responses and remain unverified live. This change does not add search, direct photo downloads, a server, or an Oblsk integration.
+
+Run the TikTok regression tests with `python -m unittest test.test_tiktok`.
+
 <!-- MANPAGE: MOVE "USAGE AND OPTIONS" SECTION HERE -->
 
 <!-- MANPAGE: BEGIN EXCLUDED SECTION -->
