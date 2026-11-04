@@ -1314,9 +1314,18 @@ class TikTokCreatorIE(TikTokProfileIE):
             raise ExtractorError('TikTok did not return the secondary author ID', expected=True)
         cursor, seen_ids, posts = int(time.time() * 1000), set(), []
         for page in range(1, 6):
-            response = self._download_json(
-                self._API_BASE_URL, profile['uploader'], f'Downloading recent posts page {page}',
-                query=self._build_web_query(sec_uid, cursor))
+            for retry in self.RetryManager():
+                try:
+                    response = self._download_json(
+                        self._API_BASE_URL, profile['uploader'], f'Downloading recent posts page {page}',
+                        query=self._build_web_query(sec_uid, cursor), impersonate=True,
+                        headers={'Accept': 'application/json', 'Referer': profile['uploader_url']})
+                except ExtractorError as error:
+                    if isinstance(error.cause, json.JSONDecodeError) and error.cause.pos == 0:
+                        retry.error = ExtractorError(
+                            'TikTok returned an empty or blocked recent-post response', expected=True)
+                        continue
+                    raise
             if (not isinstance(response, dict) or response.get('statusCode') not in (None, 0)
                     or not isinstance(response.get('itemList'), list)):
                 raise ExtractorError('TikTok did not return a valid recent-post response', expected=True)

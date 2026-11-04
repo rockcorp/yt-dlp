@@ -79,6 +79,8 @@ The metadata commands prefer `statsV2` counters over rounded `stats` values, wit
 
 The creator command checks the profile identity and each post's author, skips explicitly pinned posts and duplicate IDs, and limits pagination to five requests. Missing pin flags cannot guarantee exclusion of pinned posts. Private profiles, malformed responses, and repeated pages produce errors instead of an empty snapshot. A profile that reports zero posts returns an empty list without a feed request.
 
+Recent-post requests use browser impersonation and the author's profile URL as the referrer, matching the profile lookup. Install the `curl-cffi` extra for impersonation support. Empty or blocked non-JSON responses retry according to `--extractor-retries`; exhausted retries report a blocked recent-post response instead of a JSON parsing traceback. The command does not require search support or download media.
+
 Live tests without cookies returned author stats and ten-post snapshots for video-only and mixed profiles. The mixed snapshot included six photo posts, all with view counts. Download counts were absent in those responses and remain unverified live. This change does not add search, direct photo downloads, a server, or an Oblsk integration.
 
 Run the TikTok regression tests with `python -m unittest test.test_tiktok`.
