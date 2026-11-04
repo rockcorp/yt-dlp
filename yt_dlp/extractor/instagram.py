@@ -784,8 +784,106 @@ class InstagramCreatorIE(InstagramBaseIE):
             if not videos:
                 return
 
+    @staticmethod
+    def _media_timestamp(node):
+        # Media IDs start with milliseconds since Instagram's ID epoch. This is the
+        # creation time, which can precede the publish time by a few minutes.
+        pk = int_or_none(str(node.get('pk') or '').partition('_')[0])
+        return None if pk is None else ((pk >> 23) + 1314220021721) // 1000
+
+    def _node_metrics(self, node):
+        return traverse_obj(node, {
+            'view_count': ('play_count', {_parse_count}),
+            'like_count': ('like_count', {_parse_count}),
+            'comment_count': ('comment_count', {_parse_count}),
+        })
+
+    def _light_posts(self, username, user, post_extractor, mode):
+        """Builds post snapshots from profile pages, without one request per post.
+
+        `reels` reads only the Reels tab, which carries view, like, and comment
+        counts but no captions. `light` also reads the feed for captions and post
+        types, and requests individual posts only when the Reels tab lacks them.
+        """
+        reels_user = self._download_profile_user(username, 'reels')
+        if str(reels_user['pk']) != str(user['pk']):
+            raise ExtractorError('Instagram Reels belong to a different profile', expected=True)
+        reel_iter = self._recent_nodes(username, reels_user, post_extractor, 'reels', exclude_pinned=mode == 'reels')
+        if mode == 'reels':
+            reel_nodes = list(itertools.islice(reel_iter, 10))
+        else:
+            # The first Reels page has 12 posts. Later pages are fetched only when a
+            # recent feed reel is missing from the pages read so far.
+            # The Reels tab is not strictly chronological and can include reels that
+            # never appear in the feed, so searching cannot stop at an older reel.
+            reel_iter = itertools.islice(reel_iter, 60)
+            reels = {}
+
+            def find_reel(node):
+                while node['code'] not in reels:
+                    reel = next(reel_iter, None)
+                    if reel is None:
+                        return None
+                    reels[reel['code']] = reel
+                return reels[node['code']]
+
+        def snapshot(node, metrics_node, tab):
+            timestamp = self._media_timestamp(node)
+            if timestamp is None:
+                raise ExtractorError('Instagram did not return a post ID', expected=True)
+            return {
+                'id': node['code'],
+                'timestamp': timestamp,
+                **traverse_obj(node, {
+                    'description': ('caption', 'text', {str}),
+                    'media_type': ('media_type', {int_or_none}),
+                }),
+                **self._node_metrics(metrics_node),
+                'webpage_url': f'{self._BASE_URL}{"reel" if tab == "reels" else "p"}/{node["code"]}/',
+                'product_type': node.get('product_type') or ('clips' if tab == 'reels' else 'feed'),
+            }
+
+        if mode == 'reels':
+            posts = [snapshot(node, node, 'reels') for node in reel_nodes]
+        else:
+            posts = []
+            # Pinned posts are not always marked, so pick the newest posts by ID before
+            # requesting any individual post.
+            nodes = list(itertools.islice(self._recent_nodes(username, user, post_extractor, 'feed'), 13))
+            nodes.sort(key=lambda node: self._media_timestamp(node) or 0, reverse=True)
+            for node in nodes[:10]:
+                is_reel = node.get('product_type') == 'clips'
+                reel = find_reel(node) if is_reel else None
+                if reel is not None:
+                    # A reel in this account's own Reels tab is authored or co-authored by it,
+                    # even when the feed lists a collaborator as the owner.
+                    posts.append(snapshot(node, reel, 'feed'))
+                else:
+                    # Photos, carousels, and reels missing from the Reels tab need the post itself.
+                    post = self._post_snapshot(node, username, user, post_extractor, 'feed')
+                    post['timestamp'] = self._media_timestamp(node) or post['timestamp']
+                    posts.append(post)
+        posts.sort(key=lambda post: post['timestamp'], reverse=True)
+        return posts[:10]
+
     def _real_extract(self, url):
         username = self._match_id(url).lower()
+        mode = self._configuration_arg('posts', ['full'])[0]
+        if mode not in ('full', 'light', 'reels'):
+            raise ExtractorError('Instagram creator posts mode must be full, light, or reels', expected=True)
+        if mode != 'full':
+            user = self._download_profile_user(username, '' if mode == 'light' else 'reels')
+            if user.get('is_private'):
+                raise ExtractorError('Recent posts of private profiles are unavailable', expected=True)
+            profile = self._download_profile(username, tab='' if mode == 'light' else 'reels')
+            post_extractor = InstagramIE(self._downloader)
+            post_extractor._lsd_token = user.get('_lsd_token')
+            post_extractor.initialize()
+            posts = self._light_posts(username, user, post_extractor, mode)
+            return self.playlist_result(
+                [], profile['channel_id'], profile.get('uploader') or profile['channel'],
+                profile.get('channel_description'), instagram_posts=posts, instagram_post_tab=mode,
+                webpage_url=profile['channel_url'], **profile)
         tab = self._configuration_arg('tab', ['feed'])[0]
         if tab not in ('feed', 'reels'):
             raise ExtractorError('Instagram creator tab must be feed or reels', expected=True)
